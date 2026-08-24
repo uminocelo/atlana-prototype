@@ -1,0 +1,942 @@
+#!/usr/bin/env bash
+# Atlana CLI — manage skills, subagents, hooks, and rules across coding agents
+set -euo pipefail
+
+VERSION="0.2.0"
+
+# Works on Bash 3.2+ (macOS stock) and Bash 4/5. No associative arrays.
+
+# Resolve repo root (directory that contains skills/ hooks/ rules/)
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+if [[ -d "$SCRIPT_DIR/../skills" ]]; then
+  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+elif [[ -d "$SCRIPT_DIR/skills" ]]; then
+  ROOT="$SCRIPT_DIR"
+else
+  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+
+COMPONENTS=(skills subagents hooks rules)
+FORCE=0
+DRY_RUN=0
+JSON_OUT=0
+ALL_ITEMS=0
+PROJECT_DIR=""
+NAMES=()
+SYNC_DIRECTION="both"   # push | pull | both
+SYNC_PREFER="ask"       # atlana | agent | ask
+
+
+# Agent path helpers (Bash 3.2 compatible — no associative arrays)
+
+agent_skills_dir() {
+  case "$1" in
+    crush)    echo "${HOME}/.config/crush/skills" ;;
+    cursor)   echo "${HOME}/.cursor/skills" ;;
+    claude)   echo "${HOME}/.claude/skills" ;;
+    opencode) echo "${HOME}/.config/opencode/skills" ;;
+    agents)   echo "${HOME}/.agents/skills" ;;
+    *)        echo "" ;;
+  esac
+}
+
+agent_subagents_dir() {
+  case "$1" in
+    claude) echo "${HOME}/.claude/agents" ;;
+    *)      echo "" ;;  # crush/cursor/opencode: no custom md subagents
+  esac
+}
+
+agent_hooks_dir() {
+  case "$1" in
+    crush)  echo "${HOME}/.config/crush/hooks" ;;
+    claude) echo "${HOME}/.claude/hooks" ;;
+    *)      echo "" ;;
+  esac
+}
+
+agent_rules_dir() {
+  case "$1" in
+    crush)    echo "${HOME}/.config/crush" ;;
+    claude)   echo "${HOME}/.claude" ;;
+    cursor)   echo "${HOME}/.cursor" ;;
+    opencode) echo "${HOME}/.config/opencode" ;;
+    agents)   echo "${HOME}/.agents" ;;
+    *)        echo "" ;;
+  esac
+}
+
+agent_rules_file() {
+  case "$1" in
+    crush)    echo "CRUSH.md" ;;
+    claude)   echo "CLAUDE.md" ;;
+    cursor)   echo "rules/AGENTS.md" ;;
+    opencode) echo "AGENTS.md" ;;
+    agents)   echo "AGENTS.md" ;;
+    *)        echo "" ;;
+  esac
+}
+
+
+usage() {
+  cat <<USAGE
+Atlana v${VERSION} — portable agent environment manager
+
+Usage:
+  atlana                              Interactive mode
+  atlana <action> [options] [names...]
+
+Actions:
+  install     Install components from Atlana → agent(s) or project
+  add         Register a new item into Atlana (from a path), optionally install
+  remove      Remove item(s) from Atlana and/or from agent(s)
+  sync        Bidirectional sync Atlana ↔ agents (see --direction)
+  list        List components in Atlana and/or installed on agents
+  agents      List detected coding agents on this machine
+  help        Show this help
+
+Options:
+  --component <c>   skills | subagents | hooks | rules   (repeatable)
+  --agent <a>       crush | cursor | claude | opencode | agents | all
+  --project [dir]   Target project-local dirs (default: cwd)
+  --all             All items of the selected component(s)
+  --force           No confirmation prompts
+  --dry-run         Show actions only
+  --json            Machine-readable output (list/agents)
+  --from <path>     Source path for 'add' (skill dir, hook script, rule file, subagent md)
+  --direction <d>   sync only: push | pull | both (default: both)
+  --prefer <p>      sync conflicts: atlana | agent | ask (default: ask)
+
+Examples:
+  # New machine: install skills + hooks to Cursor only
+  atlana install --component skills --component hooks --agent cursor --all --force
+
+  # Install everything Atlana has into current project
+  atlana install --component skills --component hooks --component rules --component subagents --project --all --force
+
+  # Add a skill folder into Atlana, then offer to install
+  atlana add --component skills --from ~/Projects/banana/my-skill
+
+  # Remove a skill from Crush only
+  atlana remove my-skill --component skills --agent crush --force
+
+  # Sync all skills from Atlana to every detected agent
+  atlana sync --component skills --agent all --force
+
+  atlana list --component skills
+  atlana agents
+USAGE
+}
+
+log()  { [[ $JSON_OUT -eq 1 ]] || echo "$*"; }
+warn() { [[ $JSON_OUT -eq 1 ]] || echo "⚠  $*" >&2; }
+die()  { echo "Error: $*" >&2; exit 1; }
+
+confirm() {
+  [[ $FORCE -eq 1 ]] && return 0
+  [[ ! -t 0 ]] && return 1
+  read -r -p "$1 [y/N] " r
+  [[ "$r" =~ ^[Yy]$ ]]
+}
+
+# ── detect agents present on machine ─────────────────────────────────
+detect_agents() {
+  local found=()
+  # Prefer install dirs; fall back to binary on PATH
+  [[ -d "${HOME}/.config/crush" || -n "$(command -v crush 2>/dev/null || true)" ]] && found+=(crush)
+  [[ -d "${HOME}/.cursor" ]] && found+=(cursor)
+  [[ -d "${HOME}/.claude" || -n "$(command -v claude 2>/dev/null || true)" ]] && found+=(claude)
+  [[ -d "${HOME}/.config/opencode" || -n "$(command -v opencode 2>/dev/null || true)" ]] && found+=(opencode)
+  [[ -d "${HOME}/.agents" ]] && found+=(agents)
+  if [[ ${#found[@]} -gt 0 ]]; then
+    printf '%s\n' "${found[@]}"
+  fi
+}
+
+list_agents() {
+  local a
+  local detected
+  detected="$(detect_agents | tr '\n' ' ')"
+  if [[ $JSON_OUT -eq 1 ]]; then
+    echo -n "["
+    local first=1
+    for a in $detected; do
+      [[ -z "$a" ]] && continue
+      [[ $first -eq 1 ]] || echo -n ", "
+      printf '"%s"' "$a"
+      first=0
+    done
+    echo "]"
+    return
+  fi
+  echo ""
+  echo "Detected agents on this machine:"
+  local any=0
+  for a in $detected; do
+    [[ -z "$a" ]] && continue
+    any=1
+    echo "  • $a"
+    echo "      skills:    $(agent_skills_dir "$a")"
+    echo "      subagents: $(agent_subagents_dir "$a")"
+    echo "      hooks:     $(agent_hooks_dir "$a")"
+    echo "      rules:     $(agent_rules_dir "$a")/$(agent_rules_file "$a")"
+  done
+  [[ $any -eq 1 ]] || echo "  (none detected — install still works; dirs will be created)"
+  echo ""
+}
+
+# ── inventory inside Atlana repo ─────────────────────────────────────
+list_atlana_items() {
+  local comp="$1"
+  case "$comp" in
+    skills)
+      find "$ROOT/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do
+        basename "$d"
+      done
+      ;;
+    subagents)
+      find "$ROOT/subagents" -maxdepth 1 -type f -name '*.md' 2>/dev/null | while read -r f; do
+        basename "$f" .md
+      done
+      ;;
+    hooks)
+      find "$ROOT/hooks" -maxdepth 1 -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' \) 2>/dev/null | while read -r f; do
+        basename "$f"
+      done
+      ;;
+    rules)
+      find "$ROOT/rules" -maxdepth 1 -type f -name '*.md' 2>/dev/null | while read -r f; do
+        basename "$f"
+      done
+      ;;
+  esac
+}
+
+# ── path helpers ─────────────────────────────────────────────────────
+src_path() {
+  local comp="$1" name="$2"
+  case "$comp" in
+    skills)    echo "$ROOT/skills/$name" ;;
+    subagents) echo "$ROOT/subagents/${name}.md" ;;
+    hooks)     echo "$ROOT/hooks/$name" ;;
+    rules)     echo "$ROOT/rules/$name" ;;
+  esac
+}
+
+dest_path_agent() {
+  local comp="$1" agent="$2" name="$3"
+  case "$comp" in
+    skills)
+      echo "$(agent_skills_dir "$agent")/$name"
+      ;;
+    subagents)
+      local base="$(agent_subagents_dir "$agent")"
+      [[ -n "$base" ]] || { echo ""; return; }
+      echo "$base/${name}.md"
+      ;;
+    hooks)
+      local base="$(agent_hooks_dir "$agent")"
+      [[ -n "$base" ]] || { echo ""; return; }
+      echo "$base/$name"
+      ;;
+    rules)
+      local base="$(agent_rules_dir "$agent")"
+      local file="$(agent_rules_file "$agent")"
+      [[ -n "$base" && -n "$file" ]] || { echo ""; return; }
+      # rules: install AGENTS.md content to agent-specific filename
+      echo "$base/$file"
+      ;;
+  esac
+}
+
+dest_path_project() {
+  local comp="$1" name="$2" proj="${3:-$PROJECT_DIR}"
+  case "$comp" in
+    skills)
+      # multi-target project layout
+      echo "$proj/.cursor/skills/$name|$proj/.crush/skills/$name|$proj/.agents/skills/$name|$proj/.claude/skills/$name"
+      ;;
+    subagents)
+      echo "$proj/.claude/agents/${name}.md"
+      ;;
+    hooks)
+      echo "$proj/hooks/$name"
+      ;;
+    rules)
+      echo "$proj/AGENTS.md"
+      ;;
+  esac
+}
+
+copy_item() {
+  local src="$1" dest="$2"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "  [dry-run] install $src → $dest"
+    return
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if [[ -e "$dest" ]]; then
+    if confirm "  overwrite $dest?"; then
+      rm -rf "$dest"
+    else
+      log "  → skipped $dest"
+      return
+    fi
+  fi
+  if [[ -d "$src" ]]; then
+    cp -R "$src" "$dest"
+  else
+    cp "$src" "$dest"
+    [[ "$src" == *.sh ]] && chmod +x "$dest" 2>/dev/null || true
+  fi
+  log "  ✓  $dest"
+}
+
+remove_path() {
+  local dest="$1"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "  [dry-run] rm -rf $dest"
+    return
+  fi
+  if [[ ! -e "$dest" ]]; then
+    log "  → already gone: $dest"
+    return
+  fi
+  if confirm "  remove $dest?"; then
+    rm -rf "$dest"
+    log "  ✓  removed $dest"
+  else
+    log "  → kept $dest"
+  fi
+}
+
+# ── resolve selection of components ──────────────────────────────────
+SELECTED_COMPONENTS=()
+SELECTED_AGENTS=()
+USE_PROJECT=0
+
+pick_components_interactive() {
+  echo ""
+  echo "What do you want to manage?"
+  local i=1
+  local c
+  for c in "${COMPONENTS[@]}"; do
+    echo "  $i) $c"
+    ((i++)) || true
+  done
+  echo "  a) all"
+  read -r -p "> " input
+  if [[ "$input" == "a" || "$input" == "all" ]]; then
+    SELECTED_COMPONENTS=("${COMPONENTS[@]}")
+    return
+  fi
+  local n
+  for n in $input; do
+    if [[ "$n" =~ ^[1-4]$ ]]; then
+      SELECTED_COMPONENTS+=("${COMPONENTS[$((n-1))]}")
+    fi
+  done
+  [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]] || die "No component selected"
+}
+
+pick_action_interactive() {
+  echo ""
+  echo "Action?"
+  echo "  1) install   — Atlana → agent / project"
+  echo "  2) add       — import into Atlana (optional install after)"
+  echo "  3) remove    — from Atlana and/or agents"
+  echo "  4) sync      — push Atlana copies to agents"
+  echo "  5) list"
+  read -r -p "> " input
+  case "$input" in
+    1|install) echo install ;;
+    2|add)     echo add ;;
+    3|remove)  echo remove ;;
+    4|sync)    echo sync ;;
+    5|list)    echo list ;;
+    *) die "Unknown action" ;;
+  esac
+}
+
+pick_agents_interactive() {
+  echo ""
+  echo "Target agent(s)?"
+  local arr=()
+  while IFS= read -r a; do [[ -n "$a" ]] && arr+=("$a"); done < <(detect_agents)
+  # always offer the known set even if not detected
+  local known=(crush cursor claude opencode agents)
+  local i=1
+  local k
+  for k in "${known[@]}"; do
+    local mark=""
+    printf '%s\n' "${arr[@]+"${arr[@]}"}" | grep -qx "$k" && mark=" (detected)"
+    echo "  $i) $k$mark"
+    ((i++)) || true
+  done
+  echo "  a) all known"
+  echo "  p) project-local only"
+  read -r -p "> " input
+  if [[ "$input" == "p" || "$input" == "project" ]]; then
+    USE_PROJECT=1
+    PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
+    return
+  fi
+  if [[ "$input" == "a" || "$input" == "all" ]]; then
+    SELECTED_AGENTS=("${known[@]}")
+    return
+  fi
+  local n
+  for n in $input; do
+    if [[ "$n" =~ ^[1-5]$ ]]; then
+      SELECTED_AGENTS+=("${known[$((n-1))]}")
+    fi
+  done
+  [[ ${#SELECTED_AGENTS[@]} -gt 0 || $USE_PROJECT -eq 1 ]] || die "No agent selected"
+}
+
+# ── actions ──────────────────────────────────────────────────────────
+do_list() {
+  local comp
+  local comps
+  if [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]]; then
+    comps=("${SELECTED_COMPONENTS[@]}")
+  else
+    comps=("${COMPONENTS[@]}")
+  fi
+  for comp in "${comps[@]}"; do
+    log ""
+    log "== Atlana /$comp =="
+    list_atlana_items "$comp" | while read -r name; do
+      [[ -n "$name" ]] && log "  • $name"
+    done
+  done
+}
+
+do_install() {
+  local comp agent name src dest
+  [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]] || SELECTED_COMPONENTS=("${COMPONENTS[@]}")
+
+  for comp in "${SELECTED_COMPONENTS[@]}"; do
+    local items=()
+    if [[ ${#NAMES[@]} -gt 0 ]]; then
+      items=("${NAMES[@]}")
+    elif [[ $ALL_ITEMS -eq 1 ]]; then
+      while IFS= read -r n; do [[ -n "$n" ]] && items+=("$n"); done < <(list_atlana_items "$comp")
+    else
+      log ""
+      log "Items in Atlana/$comp:"
+      local arr=() i=1
+      while IFS= read -r n; do
+        [[ -z "$n" ]] && continue
+        arr+=("$n")
+        echo "  $i) $n"
+        ((i++)) || true
+      done < <(list_atlana_items "$comp")
+      [[ ${#arr[@]} -gt 0 ]] || { warn "No $comp in Atlana"; continue; }
+      read -r -p "Select numbers (or 'all'): " input
+      if [[ "$input" == "all" || "$input" == "a" ]]; then
+        items=("${arr[@]}")
+      else
+        local num
+        for num in $input; do
+          [[ "$num" =~ ^[0-9]+$ ]] && items+=("${arr[$((num-1))]}")
+        done
+      fi
+    fi
+
+    for name in "${items[@]}"; do
+      src="$(src_path "$comp" "$name")"
+      # skills: name is folder; hooks may be full filename
+      if [[ "$comp" == "hooks" && ! -e "$src" ]]; then
+        src="$ROOT/hooks/$name"
+      fi
+      if [[ "$comp" == "subagents" && ! -e "$src" ]]; then
+        src="$ROOT/subagents/${name}.md"
+      fi
+      if [[ ! -e "$src" ]]; then
+        # try rules basename
+        if [[ "$comp" == "rules" ]]; then
+          src="$ROOT/rules/$name"
+        fi
+      fi
+      [[ -e "$src" ]] || { warn "missing in Atlana: $comp/$name"; continue; }
+
+      if [[ $USE_PROJECT -eq 1 ]]; then
+        local paths
+        paths="$(dest_path_project "$comp" "$name" "${PROJECT_DIR:-$(pwd)}")"
+        IFS='|' read -ra multi <<< "$paths"
+        for dest in "${multi[@]}"; do
+          [[ -n "$dest" ]] || continue
+          if [[ "$comp" == "rules" ]]; then
+            # always install AGENTS.md content as AGENTS.md in project
+            dest="${PROJECT_DIR:-$(pwd)}/AGENTS.md"
+            copy_item "$ROOT/rules/AGENTS.md" "$dest"
+            break
+          fi
+          copy_item "$src" "$dest"
+        done
+      else
+        for agent in "${SELECTED_AGENTS[@]}"; do
+          dest="$(dest_path_agent "$comp" "$agent" "$name")"
+          if [[ -z "$dest" ]]; then
+            warn "$agent does not support $comp — skip"
+            continue
+          fi
+          if [[ "$comp" == "rules" ]]; then
+            # map any rule file to agent-specific rules file; prefer AGENTS.md source
+            local rules_src="$ROOT/rules/AGENTS.md"
+            [[ -f "$ROOT/rules/$name" ]] && rules_src="$ROOT/rules/$name"
+            copy_item "$rules_src" "$dest"
+          else
+            copy_item "$src" "$dest"
+          fi
+        done
+      fi
+    done
+  done
+  log ""
+  log "✓ install done. Restart agents so they rediscover skills/hooks."
+}
+
+do_add() {
+  local from="${FROM_PATH:-}"
+  [[ -n "$from" ]] || die "'add' requires --from <path>"
+  [[ -e "$from" ]] || die "path not found: $from"
+  local comp="${SELECTED_COMPONENTS[0]:-}"
+  [[ -n "$comp" ]] || die "add requires --component skills|subagents|hooks|rules"
+
+  local base dest
+  base="$(basename "$from")"
+  case "$comp" in
+    skills)
+      [[ -d "$from" ]] || die "skills --from must be a directory containing SKILL.md"
+      dest="$ROOT/skills/$base"
+      ;;
+    subagents)
+      [[ -f "$from" ]] || die "subagents --from must be a .md file"
+      dest="$ROOT/subagents/$base"
+      ;;
+    hooks)
+      [[ -f "$from" ]] || die "hooks --from must be a script file"
+      dest="$ROOT/hooks/$base"
+      ;;
+    rules)
+      [[ -f "$from" ]] || die "rules --from must be a .md file"
+      dest="$ROOT/rules/$base"
+      ;;
+  esac
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "[dry-run] add $from → $dest"
+  else
+    mkdir -p "$(dirname "$dest")"
+    if [[ -e "$dest" ]]; then
+      confirm "Overwrite Atlana $comp/$base?" || die "aborted"
+      rm -rf "$dest"
+    fi
+    cp -R "$from" "$dest"
+    [[ "$dest" == *.sh ]] && chmod +x "$dest" || true
+    log "✓ added to Atlana: $comp/$base"
+  fi
+
+  if [[ ${#SELECTED_AGENTS[@]} -gt 0 || $USE_PROJECT -eq 1 ]]; then
+    NAMES=("$base")
+    [[ "$comp" == "subagents" ]] && NAMES=("$(basename "$base" .md)")
+    ALL_ITEMS=0
+    do_install
+  else
+    if [[ -t 0 ]] && confirm "Install this $comp to agent(s) now?"; then
+      pick_agents_interactive
+      NAMES=("$base")
+      [[ "$comp" == "subagents" ]] && NAMES=("$(basename "$base" .md)")
+      do_install
+    fi
+  fi
+}
+
+do_remove() {
+  local comp name src dest agent
+  [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]] || die "specify --component"
+
+  for comp in "${SELECTED_COMPONENTS[@]}"; do
+    local items=()
+    if [[ ${#NAMES[@]} -gt 0 ]]; then
+      items=("${NAMES[@]}")
+    elif [[ $ALL_ITEMS -eq 1 ]]; then
+      while IFS= read -r n; do [[ -n "$n" ]] && items+=("$n"); done < <(list_atlana_items "$comp")
+    else
+      die "pass item names or --all"
+    fi
+
+    for name in "${items[@]}"; do
+      # remove from agents / project
+      if [[ $USE_PROJECT -eq 1 ]]; then
+        local paths
+        paths="$(dest_path_project "$comp" "$name" "${PROJECT_DIR:-$(pwd)}")"
+        IFS='|' read -ra multi <<< "$paths"
+        for dest in "${multi[@]}"; do
+          [[ -n "$dest" ]] && remove_path "$dest"
+        done
+      fi
+      for agent in "${SELECTED_AGENTS[@]+"${SELECTED_AGENTS[@]}"}"; do
+        dest="$(dest_path_agent "$comp" "$agent" "$name")"
+        [[ -n "$dest" ]] && remove_path "$dest"
+      done
+
+      # optionally remove from Atlana repo itself
+      src="$(src_path "$comp" "$name")"
+      if [[ "$comp" == "hooks" && ! -e "$src" ]]; then src="$ROOT/hooks/$name"; fi
+      if [[ "$comp" == "subagents" && ! -e "$src" ]]; then src="$ROOT/subagents/${name}.md"; fi
+      if [[ -e "$src" ]]; then
+        if confirm "Also remove from Atlana repo ($src)?"; then
+          remove_path "$src"
+        fi
+      fi
+    done
+  done
+}
+
+file_hash() {
+  local path="$1"
+  if [[ -d "$path" ]]; then
+    # stable hash of directory contents (names + file hashes)
+    (cd "$path" && find . -type f | sort | while read -r f; do
+      printf "%s " "$f"
+      sha256sum "$f" 2>/dev/null | awk "{print \$1}"
+    done) | sha256sum | awk "{print \$1}"
+  elif [[ -f "$path" ]]; then
+    sha256sum "$path" 2>/dev/null | awk "{print \$1}"
+  else
+    echo ""
+  fi
+}
+
+sync_status() {
+  # prints: identical | only_atlana | only_agent | differ | unsupported
+  local src="$1" dest="$2"
+  if [[ -z "$dest" ]]; then
+    echo "unsupported"
+    return
+  fi
+  local hs hd
+  hs="$(file_hash "$src")"
+  hd="$(file_hash "$dest")"
+  if [[ ! -e "$src" && ! -e "$dest" ]]; then
+    echo "identical"
+  elif [[ -e "$src" && ! -e "$dest" ]]; then
+    echo "only_atlana"
+  elif [[ ! -e "$src" && -e "$dest" ]]; then
+    echo "only_agent"
+  elif [[ "$hs" == "$hd" && -n "$hs" ]]; then
+    echo "identical"
+  else
+    echo "differ"
+  fi
+}
+
+resolve_conflict() {
+  # sets RESOLVE to atlana|agent|skip
+  local name="$1"
+  RESOLVE="skip"
+  case "$SYNC_PREFER" in
+    atlana) RESOLVE="atlana" ;;
+    agent)  RESOLVE="agent" ;;
+    ask)
+      if [[ $FORCE -eq 1 ]]; then
+        RESOLVE="atlana"
+        return
+      fi
+      if [[ ! -t 0 ]]; then
+        warn "conflict on $name — non-interactive; pass --prefer atlana|agent"
+        RESOLVE="skip"
+        return
+      fi
+      echo "  conflict: $name differs"
+      echo "    1) keep Atlana (push)"
+      echo "    2) keep agent  (pull)"
+      echo "    3) skip"
+      read -r -p "  > " choice
+      case "$choice" in
+        1) RESOLVE="atlana" ;;
+        2) RESOLVE="agent" ;;
+        *) RESOLVE="skip" ;;
+      esac
+      ;;
+  esac
+}
+
+do_sync() {
+  local comp agent name src dest st
+  [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]] || SELECTED_COMPONENTS=("${COMPONENTS[@]}")
+
+  log ""
+  log "Sync direction: $SYNC_DIRECTION  prefer: $SYNC_PREFER"
+  log ""
+
+  for comp in "${SELECTED_COMPONENTS[@]}"; do
+    local items=()
+    if [[ ${#NAMES[@]} -gt 0 ]]; then
+      items=("${NAMES[@]}")
+    else
+      # union of atlana names + names found on agents
+      local seen=""
+      while IFS= read -r n; do
+        [[ -z "$n" ]] && continue
+        items+=("$n")
+        seen="$seen|$n|"
+      done < <(list_atlana_items "$comp")
+      if [[ $USE_PROJECT -eq 0 ]]; then
+        for agent in "${SELECTED_AGENTS[@]+"${SELECTED_AGENTS[@]}"}"; do
+          case "$comp" in
+            skills)
+              local d="$(agent_skills_dir "$agent")"
+              [[ -d "$d" ]] || continue
+              for p in "$d"/*; do
+                [[ -d "$p" ]] || continue
+                n="$(basename "$p")"
+                [[ "$seen" == *"|$n|"* ]] && continue
+                items+=("$n"); seen="$seen|$n|"
+              done
+              ;;
+            subagents)
+              local d="$(agent_subagents_dir "$agent")"
+              [[ -d "$d" ]] || continue
+              for p in "$d"/*.md; do
+                [[ -f "$p" ]] || continue
+                n="$(basename "$p" .md)"
+                [[ "$seen" == *"|$n|"* ]] && continue
+                items+=("$n"); seen="$seen|$n|"
+              done
+              ;;
+            hooks)
+              local d="$(agent_hooks_dir "$agent")"
+              [[ -d "$d" ]] || continue
+              for p in "$d"/*; do
+                [[ -f "$p" ]] || continue
+                n="$(basename "$p")"
+                [[ "$seen" == *"|$n|"* ]] && continue
+                items+=("$n"); seen="$seen|$n|"
+              done
+              ;;
+            rules)
+              # always consider AGENTS.md / agent rules file
+              n="AGENTS.md"
+              [[ "$seen" == *"|$n|"* ]] || { items+=("$n"); seen="$seen|$n|"; }
+              ;;
+          esac
+        done
+      fi
+    fi
+
+    log "== $comp =="
+    for name in "${items[@]}"; do
+      src="$(src_path "$comp" "$name")"
+      if [[ "$comp" == "hooks" && ! -e "$src" ]]; then src="$ROOT/hooks/$name"; fi
+      if [[ "$comp" == "subagents" && ! -e "$src" ]]; then src="$ROOT/subagents/${name}.md"; fi
+      if [[ "$comp" == "rules" ]]; then
+        src="$ROOT/rules/AGENTS.md"
+        [[ -f "$ROOT/rules/$name" ]] && src="$ROOT/rules/$name"
+      fi
+
+      if [[ $USE_PROJECT -eq 1 ]]; then
+        local paths dests
+        paths="$(dest_path_project "$comp" "$name" "${PROJECT_DIR:-$(pwd)}")"
+        IFS='|' read -ra dests <<< "$paths"
+        for dest in "${dests[@]}"; do
+          [[ -n "$dest" ]] || continue
+          [[ "$comp" == "rules" ]] && dest="${PROJECT_DIR:-$(pwd)}/AGENTS.md"
+          st="$(sync_status "$src" "$dest")"
+          _sync_one "$comp" "$name" "$src" "$dest" "$st" "project"
+          [[ "$comp" == "rules" ]] && break
+        done
+      else
+        for agent in "${SELECTED_AGENTS[@]+"${SELECTED_AGENTS[@]}"}"; do
+          dest="$(dest_path_agent "$comp" "$agent" "$name")"
+          st="$(sync_status "$src" "$dest")"
+          _sync_one "$comp" "$name" "$src" "$dest" "$st" "$agent"
+        done
+      fi
+    done
+  done
+  log ""
+  log "✓ sync complete"
+}
+
+_sync_one() {
+  local comp="$1" name="$2" src="$3" dest="$4" st="$5" label="$6"
+  case "$st" in
+    unsupported)
+      warn "$label: $comp/$name not supported — skip"
+      return
+      ;;
+    identical)
+      log "  =  $name ($label) identical"
+      return
+      ;;
+    only_atlana)
+      if [[ "$SYNC_DIRECTION" == "pull" ]]; then
+        log "  ·  $name ($label) only in Atlana — pull skipped"
+        return
+      fi
+      log "  →  $name ($label) push (only in Atlana)"
+      copy_item "$src" "$dest"
+      ;;
+    only_agent)
+      if [[ "$SYNC_DIRECTION" == "push" ]]; then
+        log "  ·  $name ($label) only on agent — push skipped"
+        return
+      fi
+      log "  ←  $name ($label) pull (only on agent)"
+      # pull into Atlana
+      local pull_dest
+      pull_dest="$(src_path "$comp" "$name")"
+      if [[ "$comp" == "subagents" ]]; then
+        pull_dest="$ROOT/subagents/${name}.md"
+      elif [[ "$comp" == "hooks" ]]; then
+        pull_dest="$ROOT/hooks/$name"
+      elif [[ "$comp" == "rules" ]]; then
+        pull_dest="$ROOT/rules/AGENTS.md"
+      elif [[ "$comp" == "skills" ]]; then
+        pull_dest="$ROOT/skills/$name"
+      fi
+      copy_item "$dest" "$pull_dest"
+      ;;
+    differ)
+      if [[ "$SYNC_DIRECTION" == "push" ]]; then
+        log "  →  $name ($label) push (overwrite agent)"
+        copy_item "$src" "$dest"
+        return
+      fi
+      if [[ "$SYNC_DIRECTION" == "pull" ]]; then
+        log "  ←  $name ($label) pull (overwrite Atlana)"
+        local pull_dest
+        pull_dest="$(src_path "$comp" "$name")"
+        [[ "$comp" == "subagents" ]] && pull_dest="$ROOT/subagents/${name}.md"
+        [[ "$comp" == "hooks" ]] && pull_dest="$ROOT/hooks/$name"
+        [[ "$comp" == "rules" ]] && pull_dest="$ROOT/rules/AGENTS.md"
+        [[ "$comp" == "skills" ]] && pull_dest="$ROOT/skills/$name"
+        copy_item "$dest" "$pull_dest"
+        return
+      fi
+      # both
+      resolve_conflict "$name ($label)"
+      case "$RESOLVE" in
+        atlana)
+          log "  →  $name ($label) conflict → Atlana wins"
+          copy_item "$src" "$dest"
+          ;;
+        agent)
+          log "  ←  $name ($label) conflict → agent wins"
+          local pull_dest
+          pull_dest="$(src_path "$comp" "$name")"
+          [[ "$comp" == "subagents" ]] && pull_dest="$ROOT/subagents/${name}.md"
+          [[ "$comp" == "hooks" ]] && pull_dest="$ROOT/hooks/$name"
+          [[ "$comp" == "rules" ]] && pull_dest="$ROOT/rules/AGENTS.md"
+          [[ "$comp" == "skills" ]] && pull_dest="$ROOT/skills/$name"
+          copy_item "$dest" "$pull_dest"
+          ;;
+        *)
+          log "  ·  $name ($label) conflict skipped"
+          ;;
+      esac
+      ;;
+  esac
+}
+
+
+# ── parse args ───────────────────────────────────────────────────────
+ACTION=""
+FROM_PATH=""
+CLI_COMPONENTS=()
+CLI_AGENTS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    install|add|remove|sync|list|agents|help|--help|-h)
+      ACTION="$1"; shift ;;
+    --component|-c)
+      CLI_COMPONENTS+=("$2"); shift 2 ;;
+    --agent|-a)
+      if [[ "$2" == "all" ]]; then
+        CLI_AGENTS=(crush cursor claude opencode agents)
+      else
+        CLI_AGENTS+=("$2")
+      fi
+      shift 2 ;;
+    --project)
+      USE_PROJECT=1
+      if [[ $# -gt 1 && ! "$2" =~ ^-- ]]; then
+        PROJECT_DIR="$2"; shift 2
+      else
+        PROJECT_DIR="$(pwd)"; shift
+      fi
+      ;;
+    --from)
+      FROM_PATH="$2"; shift 2 ;;
+    --direction)
+      SYNC_DIRECTION="$2"; shift 2 ;;
+    --prefer)
+      SYNC_PREFER="$2"; shift 2 ;;
+    --all) ALL_ITEMS=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    --version) echo "$VERSION"; exit 0 ;;
+    --*) die "Unknown option: $1" ;;
+    *) NAMES+=("$1"); shift ;;
+  esac
+done
+
+[[ "$ACTION" == "help" || "$ACTION" == "--help" || "$ACTION" == "-h" ]] && { usage; exit 0; }
+
+SELECTED_COMPONENTS=("${CLI_COMPONENTS[@]+"${CLI_COMPONENTS[@]}"}")
+SELECTED_AGENTS=("${CLI_AGENTS[@]+"${CLI_AGENTS[@]}"}")
+
+# Interactive entry
+if [[ -z "$ACTION" ]]; then
+  echo ""
+  echo "╔══════════════════════════════════════╗"
+  echo "║         Atlana environment           ║"
+  echo "╚══════════════════════════════════════╝"
+  echo "Root: $ROOT"
+  list_agents
+  pick_components_interactive
+  ACTION="$(pick_action_interactive)"
+  if [[ "$ACTION" != "list" ]]; then
+    pick_agents_interactive
+  fi
+fi
+
+case "$ACTION" in
+  agents) list_agents ;;
+  list)
+    [[ ${#SELECTED_COMPONENTS[@]} -eq 0 ]] && SELECTED_COMPONENTS=("${COMPONENTS[@]}")
+    do_list
+    ;;
+  install)
+    [[ ${#SELECTED_AGENTS[@]} -eq 0 && $USE_PROJECT -eq 0 ]] && {
+      [[ -t 0 ]] && pick_agents_interactive || die "need --agent or --project"
+    }
+    [[ ${#SELECTED_COMPONENTS[@]} -eq 0 ]] && {
+      [[ -t 0 ]] && pick_components_interactive || die "need --component"
+    }
+    do_install
+    ;;
+  add)
+    [[ ${#SELECTED_COMPONENTS[@]} -eq 0 ]] && die "add requires --component"
+    do_add
+    ;;
+  remove)
+    [[ ${#SELECTED_COMPONENTS[@]} -eq 0 ]] && die "remove requires --component"
+    do_remove
+    ;;
+  sync)
+    [[ ${#SELECTED_AGENTS[@]} -eq 0 && $USE_PROJECT -eq 0 ]] && {
+      [[ -t 0 ]] && pick_agents_interactive || die "need --agent or --project"
+    }
+    [[ ${#SELECTED_COMPONENTS[@]} -eq 0 ]] && SELECTED_COMPONENTS=("${COMPONENTS[@]}")
+    do_sync
+    ;;
+  *) usage; exit 1 ;;
+esac
