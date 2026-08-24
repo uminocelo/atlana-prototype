@@ -39,7 +39,7 @@ bash --version   # 3.2+ is enough
 ## Quick start
 
 ```bash
-git clone https://github.com/uminocelo/atlana.git
+git clone https://github.com/uminocelo/atlana-prototype.git
 cd atlana
 chmod +x bin/atlana
 
@@ -59,7 +59,7 @@ Restart your agents after installing so they rediscover new files.
 ### One-liner bootstrap
 
 ```bash
-git clone --depth 1 https://github.com/uminocelo/atlana.git /tmp/atlana \
+git clone --depth 1 https://github.com/uminocelo/atlana-prototype.git /tmp/atlana \
   && /tmp/atlana/install.sh --agent cursor --force \
   && rm -rf /tmp/atlana
 ```
@@ -67,7 +67,7 @@ git clone --depth 1 https://github.com/uminocelo/atlana.git /tmp/atlana \
 Or piped:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/uminocelo/atlana/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/uminocelo/atlana-prototype/main/install.sh \
   | bash -s -- --agent cursor --force
 ```
 
