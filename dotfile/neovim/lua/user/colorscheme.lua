@@ -1,0 +1,2 @@
+-- Personal colorscheme override. Uncomment to force a variant.
+-- vim.cmd.colorscheme("kanagawa-dragon")

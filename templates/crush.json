@@ -19,12 +19,6 @@
         "matcher": "^bash$",
         "command": "./hooks/block-destructive.sh",
         "timeout": 10
-      },
-      {
-        "name": "protect-plan",
-        "matcher": "^(edit|write|multiedit)$",
-        "command": "./hooks/protect-plan-files.sh",
-        "timeout": 10
       }
     ]
   }

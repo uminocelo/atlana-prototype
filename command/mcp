@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# atlana mcp — start the Atlana MCP server
+#
+# Usage:
+#   atlana mcp                  # start (stdio)
+#   atlana mcp --inspect        # open MCP Inspector
+#   atlana mcp --python         # force Python server
+#   atlana mcp --typescript     # force TypeScript server
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$SCRIPT_DIR/../skills" ]]; then
+  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+elif [[ -d "$SCRIPT_DIR/skills" ]]; then
+  ROOT="$SCRIPT_DIR"
+else
+  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+
+MCP_DIR="$ROOT/mcp"
+PYTHON_SERVER="$MCP_DIR/server.py"
+TS_SERVER="$MCP_DIR/typescript/src/index.ts"
+VENV_PYTHON="$MCP_DIR/.venv/bin/python"
+
+MODE="python"
+INSPECT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --inspect|-i) INSPECT=1; shift ;;
+    --typescript|--ts) MODE="typescript"; shift ;;
+    --python|--py) MODE="python"; shift ;;
+    -h|--help)
+      echo "Usage: atlana mcp [--inspect] [--python|--typescript]"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+export ATLANA_ROOT="$ROOT"
+
+if [[ "$INSPECT" -eq 1 ]]; then
+  echo "Starting MCP Inspector..."
+  echo "Point it at: $PYTHON_SERVER"
+  echo "Env: ATLANA_ROOT=$ROOT"
+  exec npx -y @modelcontextprotocol/inspector
+fi
+
+if [[ "$MODE" == "typescript" ]]; then
+  if [[ ! -f "$TS_SERVER" ]]; then
+    echo "TypeScript server not found: $TS_SERVER" >&2
+    exit 1
+  fi
+  cd "$MCP_DIR/typescript"
+  if [[ ! -d node_modules ]]; then
+    echo "Installing TypeScript dependencies..."
+    npm install
+  fi
+  exec npx tsx src/index.ts
+fi
+
+# Python (default)
+if [[ -x "$VENV_PYTHON" ]]; then
+  exec "$VENV_PYTHON" "$PYTHON_SERVER"
+fi
+
+# fallback to system python3
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$PYTHON_SERVER"
+fi
+
+echo "No Python found. Create a venv first:" >&2
+echo "  cd $MCP_DIR && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt" >&2
+exit 1

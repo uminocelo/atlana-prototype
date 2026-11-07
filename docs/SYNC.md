@@ -48,7 +48,7 @@ Hashes are **content-based** (`sha256`), not mtime, so clock skew does not creat
 ./bin/atlana sync --component skills --agent all --direction both --prefer atlana --force
 
 # One skill, one agent
-./bin/atlana sync idea-planner --component skills --agent crush --direction both
+./bin/atlana sync my-skill --component skills --agent crush --direction both
 ```
 
 ## Safety notes

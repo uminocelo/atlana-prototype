@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="${REPO_URL:-https://github.com/uminocelo/atlana}"
+REPO_URL="${REPO_URL:-https://github.com/uminocelo/atlana-prototype}"
 
 if [[ -x "$SCRIPT_DIR/bin/atlana" ]]; then
   ROOT="$SCRIPT_DIR"

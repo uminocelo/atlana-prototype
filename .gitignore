@@ -10,3 +10,11 @@ Thumbs.db
 
 # Local install leftovers
 *.log
+
+# Claude-synced skill cache pulled in by `atlana sync --direction pull`
+skills/synced/
+
+# MCP server local environments
+mcp/.venv/
+mcp/typescript/node_modules/
+__pycache__/

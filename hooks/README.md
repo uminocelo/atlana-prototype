@@ -2,6 +2,12 @@
 
 Deterministic guardrails. Hooks run **outside** the model — they cannot be talked out of.
 
+`block-destructive.sh` is the example hook. Add your own next to it: read the
+command or path from the env vars (`CRUSH_TOOL_INPUT_COMMAND`,
+`CLAUDE_TOOL_INPUT_COMMAND`, `CRUSH_TOOL_INPUT_FILE_PATH`) or the JSON on
+stdin, exit `0` to allow, and exit `2` with a reason on stderr to deny. Wire it
+up here and in `templates/crush.json`.
+
 ## Crush
 
 Add to project `.crush.json` or `crush.json`:
@@ -12,9 +18,9 @@ Add to project `.crush.json` or `crush.json`:
   "hooks": {
     "PreToolUse": [
       {
-        "name": "your-script",
+        "name": "block-destructive",
         "matcher": "^bash$",
-        "command": "./hooks/your-script.sh",
+        "command": "./hooks/block-destructive.sh",
         "timeout": 10
       }
     ]
@@ -25,8 +31,8 @@ Add to project `.crush.json` or `crush.json`:
 Or via `crushrc`:
 
 ```bash
-hook add PreToolUse --name your-script --matcher '^bash$' \
-  --command './hooks/your-script.sh' --timeout 10
+hook add PreToolUse --name block-destructive --matcher '^bash$' \
+  --command './hooks/block-destructive.sh' --timeout 10
 ```
 
 Make scripts executable: `chmod +x hooks/*.sh`
@@ -46,7 +52,7 @@ In `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/your-script.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/block-destructive.sh"
           }
         ]
       }
