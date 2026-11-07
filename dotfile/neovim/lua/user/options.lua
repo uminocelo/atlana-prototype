@@ -1,0 +1,3 @@
+-- Personal overrides. Loaded after core options.
+-- Example:
+-- vim.opt.relativenumber = false

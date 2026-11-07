@@ -1,102 +1,70 @@
-# Atlana
+# Atlana Prototype
 
-**Atlana** is a single-file Bash CLI that manages a portable environment for AI coding agents: **skills**, **subagents**, **hooks**, and **rules** — from one repo, across every agent on your machine.
+**Atlana** is a portable environment for AI coding agents: **skills**, **rules**, **hooks**, and **subagents**, managed by one CLI and installed into every agent on your machine (or into a project).
 
-Primary target: **Crush** (Charmbracelet). Also works with **Cursor**, **Claude Code**, **OpenCode**, and any agent that loads [Agent Skills](https://agentskills.io) (`SKILL.md`) and common context files (`AGENTS.md` / `CLAUDE.md`).
+This repository is the **empty framework**: the CLI, the hook and MCP plumbing, and the docs, with **no skills**. Fork it, add only what you want, and keep your environment in your own git repo. (The author's full setup lives in [uminocelo/atlana](https://github.com/uminocelo/atlana).)
+
+Works with **Crush** (Charmbracelet), **Cursor**, **Claude Code**, **OpenCode**, **Grok**, and any agent that loads [Agent Skills](https://agentskills.io) (`SKILL.md`) and common context files (`AGENTS.md` / `CLAUDE.md`).
 
 | Doc | Topic |
-|-----|-------|
+|-----|--------|
 | [PORTING.md](PORTING.md) | Map rules / hooks / subagents across agents |
 | [docs/SYNC.md](docs/SYNC.md) | Bidirectional sync details |
 | [hooks/README.md](hooks/README.md) | Hook wire-up for Crush / Claude Code / OpenCode |
+| [mcp/README.md](mcp/README.md) | MCP server: tools, resources, safety model |
+| [command/README.md](command/README.md) | `atlana <command>` shortcuts |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
-
----
-
-## Why
-
-Every coding agent keeps its own config in its own place. Atlana gives you:
-
-- **One source of truth** — your skills, rules, hooks, and subagent definitions live here, versioned with git.
-- **Many targets** — install the same component to Crush, Cursor, Claude Code, OpenCode, or all of them at once.
-- **Bidirectional sync** — content-hash based (`sha256`, not mtime), so experiments done inside an agent can be pulled back into the repo safely.
-- **Zero dependencies** — plain Bash 3.2+ (macOS stock Bash works). Markdown + YAML frontmatter everywhere else.
 
 ---
 
 ## Requirements
 
-- **Bash 3.2+** — no associative arrays used
-- `git` — for the clone-based install
-- Optional: `sha256sum` — required by `sync` (usually present via coreutils)
-
-```bash
-bash --version   # 3.2+ is enough
-```
+- **Bash 3.2+** (macOS stock Bash is fine — no associative arrays required)
+- `git`
+- Optional: `sha256sum` (used by `sync`; usually present via coreutils)
+- Optional: Python 3.10+ for the MCP server (`mcp/`) and `utils/add-agent.sh`
 
 ---
 
 ## Quick start
 
-```bash
-git clone https://github.com/uminocelo/atlana-prototype.git
-cd atlana
-chmod +x bin/atlana
+1. **Fork** this repository on GitHub, then clone your fork:
 
-# Interactive: component → action → agent
-./bin/atlana
+   ```bash
+   git clone https://github.com/<you>/atlana-prototype.git atlana
+   cd atlana
+   chmod +x bin/atlana hooks/*.sh command/* utils/*.sh
+   ```
 
-# Or explicit — new machine, skills + hooks → Cursor only
-./bin/atlana install \
-  --component skills --component hooks \
-  --agent cursor --all --force
-```
+2. **Make it yours** (see [Make it yours](#make-it-yours)): add skills, edit `rules/AGENTS.md`, keep or delete the examples, and point `install.sh` at your fork.
 
-Day-to-day, just run `./bin/atlana` (or symlink `bin/atlana` somewhere on your `PATH`). `install.sh` is only a thin bootstrap that calls `bin/atlana install …`.
+3. **Install** into your agents:
 
-Restart your agents after installing so they rediscover new files.
+   ```bash
+   ./bin/atlana                      # interactive: action → component → agent
+   ./bin/atlana agents               # which agents are on this machine
 
-### One-liner bootstrap
+   ./bin/atlana install \
+     --component skills --component hooks --component rules --component subagents \
+     --agent all --all --force
+   ```
 
-```bash
-git clone --depth 1 https://github.com/uminocelo/atlana-prototype.git /tmp/atlana \
-  && /tmp/atlana/install.sh --agent cursor --force \
-  && rm -rf /tmp/atlana
-```
-
-Or piped:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/uminocelo/atlana-prototype/main/install.sh \
-  | bash -s -- --agent cursor --force
-```
-
-`install.sh` installs all four components (`--all`) and forwards any extra flags to `bin/atlana install`.
+4. Optional: put `atlana` on your `PATH` with `./bin/atlana install-cli` (symlinks to `~/.local/bin/atlana`).
 
 ---
 
-## What Atlana manages
+## Make it yours
 
-| Component | Format | Used by |
-|-----------|--------|---------|
-| **Skills** | Folders with `SKILL.md` ([Agent Skills](https://agentskills.io)) | All supported agents |
-| **Subagents** | Markdown agents with YAML frontmatter | Claude Code (`.claude/agents/`) |
-| **Hooks** | Shell scripts, exit `2` = deny | Crush + Claude Code (`PreToolUse`) |
-| **Rules** | `AGENTS.md` context file, mapped to agent-specific names | All supported agents |
-
-Atlana ships examples for **subagents** (`subagents/explorer.md`, `reviewer.md`, `planner.md`), **rules** (`rules/AGENTS.md` mirrored as `rules/CLAUDE.md`), and hook wiring (`templates/crush.json`). Skills and hook scripts are yours to add — see below.
-
-### Adding your own
-
-```bash
-# Import a skill folder from another project into Atlana, then install to Crush
-./bin/atlana add --component skills --from ~/Projects/banana/my-skill --agent crush --force
-
-# Import a hook script
-./bin/atlana add --component hooks --from ~/scripts/block-destructive.sh
-```
-
-Anything under `skills/` (a directory with `SKILL.md`), `hooks/*.sh`, `rules/*.md`, or `subagents/*.md` becomes manageable automatically.
+| Step | What to do |
+|------|------------|
+| **Skills** | Add one folder per skill: `skills/<name>/SKILL.md` (kebab-case, top level). Or import one you already use: `./bin/atlana add --component skills --from ~/path/to/my-skill`. Format rules are in [CONTRIBUTING.md](CONTRIBUTING.md#skill-format-checklist-for-skills-in-your-fork). |
+| **Rules** | Fill in `rules/AGENTS.md` (stack, commands, conventions). Keep `rules/CLAUDE.md` in sync with it. |
+| **Hooks** | Keep `hooks/block-destructive.sh`, adjust its patterns, or add your own guardrails. |
+| **Subagents** | `explorer`, `reviewer`, and `planner` are generic. The `elixir-*` ones are **examples**; delete them if you don't write Elixir. |
+| **Dotfiles** | `dotfile/neovim/` is an **example** Neovim config. Replace it with yours or delete it (and `command/install-neovim`, `command/sync-neovim`). |
+| **MCP** | Optional. Add tools for your own stack to `mcp/server.py`. |
+| **Agents** | Missing an agent? `./bin/atlana add-agent <name>` patches the CLI for it. |
+| **Bootstrap URL** | In `install.sh`, set `REPO_URL` to your fork so the one-liner installs *your* environment. |
 
 ---
 
@@ -104,24 +72,23 @@ Anything under `skills/` (a directory with `SKILL.md`), `hooks/*.sh`, `rules/*.m
 
 ```
 atlana/
-├── bin/atlana              # The CLI (single file, Bash 3.2+)
-├── skills/                 # Agent Skills — add your own SKILL.md folders
+├── bin/atlana              # CLI (install | add | remove | sync | list | agents | <command>)
+├── skills/                 # your Agent Skills (empty: add your own)
 ├── subagents/              # Claude-style agent markdown
-│   ├── explorer.md         #   read-only research
-│   ├── reviewer.md         #   post-change review
-│   └── planner.md          #   isolated planning session
-├── hooks/                  # PreToolUse scripts (exit 2 = deny)
-│   └── README.md           #   wiring guide for Crush / Claude / OpenCode
-├── rules/                  # Context files
-│   ├── AGENTS.md           #   source of truth
-│   └── CLAUDE.md           #   mirror for Claude Code
+│   ├── explorer.md  reviewer.md  planner.md        # generic
+│   └── elixir-writer.md  elixir-reviewer.md  elixir-business-validator.md   # examples
+├── hooks/                  # PreToolUse scripts (Crush + Claude compatible)
+│   └── block-destructive.sh
+├── rules/                  # AGENTS.md, CLAUDE.md (templates for your projects)
+├── mcp/                    # MCP server exposing skills/hooks/rules (atlana mcp)
+├── command/                # shortcuts: atlana <name> (mcp, add-agent, install-cli, …)
+├── utils/                  # add-agent.sh, install-cli.sh, install-mcp.sh
+├── dotfile/                # editor configs (example: neovim/)
 ├── agents/                 # reserved for future agent profiles
-├── templates/
-│   └── crush.json          # Example Crush config (hooks + skill paths)
-├── docs/SYNC.md            # Bidirectional sync reference
-├── PORTING.md              # Cross-agent mapping guide
-├── install.sh              # Thin bootstrap → bin/atlana install
-└── skill-manager.sh        # Deprecated wrapper → bin/atlana
+├── templates/crush.json    # Crush config wiring skills paths + hooks
+├── docs/SYNC.md
+├── PORTING.md
+└── install.sh              # thin wrapper → bin/atlana install
 ```
 
 ---
@@ -137,65 +104,116 @@ Actions:
   add         Import a path into Atlana (optional install after)
   remove      Remove from agents and/or the Atlana repo
   sync        Bidirectional sync (see --direction / docs/SYNC.md)
-  list        List items in Atlana (--json supported)
-  agents      Detect agents on this machine (--json supported)
+  list        List items in Atlana
+  agents      Detect agents on this machine
+  commands    List command/ shortcuts
   help
 
 Options:
   --component <c>    skills | subagents | hooks | rules   (repeatable)
-  --agent <a>        crush | cursor | claude | opencode | agents | all
+  --agent <a>        crush | cursor | claude | opencode | grok | agents | all
   --project [dir]    Project-local targets (default: cwd)
   --all              All items of the selected component(s)
-  --force            Skip confirmations
+  --force            Skip confirmations (required when not on a TTY)
   --dry-run          Print actions only
   --from <path>      Source for add
   --direction <d>    sync: push | pull | both (default: both)
   --prefer <p>       sync conflicts: atlana | agent | ask (default: ask)
   --json             Machine-readable output (list / agents)
-  --version
 ```
 
 ### Examples
 
 ```bash
-# Inventory
-./bin/atlana list --component skills
-./bin/atlana agents
+# Import a skill you already use, then install it to Crush
+./bin/atlana add --component skills --from ~/Projects/banana/my-skill --agent crush --force
 
-# Install everything into the current project (team-friendly, committed to git)
+# Install one skill everywhere
+./bin/atlana install my-skill --component skills --agent all --force
+
+# Install everything into the current project (team-friendly)
 ./bin/atlana install \
   --component skills --component hooks --component rules --component subagents \
   --project --all --force
 
-# Install skills + hooks to Crush only
-./bin/atlana install --component skills --component hooks --agent crush --all --force
-
 # Remove one skill from Cursor
 ./bin/atlana remove my-skill --component skills --agent cursor --force
-
-# Preview before touching anything
-./bin/atlana sync --component skills --agent all --dry-run
 
 # Sync skills both ways with every known agent
 ./bin/atlana sync --component skills --agent all --direction both
 
-# Deploy-only (never overwrite Atlana from agents)
-./bin/atlana sync --component skills --component hooks \
-  --agent cursor --direction push --force
+# Pull edits made inside an agent back into the repo (review with git diff)
+./bin/atlana sync --component skills --agent crush --direction pull --prefer agent --force
 ```
 
-### Sync model
+Non-interactive runs must pass `--force`: without a TTY, confirmations answer "no" and overwrites are skipped.
 
-Each `(component, item, target)` pair is compared by content hash:
+---
 
-| State | Action in `both` (default) |
-|-------|----------------------------|
-| identical | no-op |
-| only in Atlana | push → agent |
-| only on agent | pull → Atlana |
-| differ | conflict → resolved by `--prefer` |
+## One-liner bootstrap
 
-With `--prefer ask` (default) conflicts prompt interactively; `--force` falls back to *Atlana wins*. See [docs/SYNC.md](docs/SYNC.md).
+After setting `REPO_URL` in `install.sh` to your fork:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<you>/atlana-prototype/main/install.sh \
+  | bash -s -- --agent cursor --force
+```
+
+`install.sh` always installs all four components (skills, hooks, rules, subagents) with `--all` and forwards extra flags. Use `bin/atlana` directly for selective installs.
+
+---
+
+## Components
+
+### Skills
+
+Empty on purpose. Each skill is a folder with a `SKILL.md` (YAML frontmatter `name` + `description`, then instructions), optionally with `references/`, `scripts/`, or `assets/`. Agents load a skill when its `description` matches the task, so write descriptions that say *when* to use it.
+
+### Rules
+
+- Source of truth: `rules/AGENTS.md` (a template with placeholders for your stack)
+- `rules/CLAUDE.md` mirrors it for Claude Code
+- Install maps it to agent-specific names (`CRUSH.md`, `CLAUDE.md`, project `AGENTS.md`, …)
+
+### Hooks
+
+Deterministic guardrails (exit `2` = deny). Compatible with Crush and Claude Code `PreToolUse`:
+
+| Script | Purpose |
+|--------|---------|
+| `block-destructive.sh` | Blocks `rm -rf /`, force-push, `reset --hard`, etc. |
+
+Wire-up examples: `hooks/README.md` and `templates/crush.json`.
+
+### Subagents
+
+Markdown agents under `subagents/` (Claude Code `.claude/agents/`):
+
+| File | Role |
+|------|------|
+| `explorer.md` | Read-only research |
+| `reviewer.md` | Post-change review |
+| `planner.md` | Structured plan in an isolated session (chat only) |
+| `elixir-writer.md` | *Example:* idiomatic Elixir implementation + tests |
+| `elixir-reviewer.md` | *Example:* Elixir review (logic, DRY, boundaries, OTP/Ecto) |
+| `elixir-business-validator.md` | *Example:* validate business rules vs code |
+
+Crush uses built-in **coder** / **task** agents; encode specialized behavior with skills + rules there.
+
+### MCP server
+
+`atlana mcp` starts a stdio MCP server (`mcp/server.py`) that serves your skills, hooks, rules, and commands to any MCP client, and offers framework tools (sync status, skill diff, hook testing, test runner, read-only DB queries, …). Set it up and register it with Claude Code:
+
+```bash
+./utils/install-mcp.sh
+claude mcp add atlana -s user -- /absolute/path/to/atlana/bin/atlana mcp
+```
+
+Tools, resources, the safety model, and how to keep API tokens out of config files: [`mcp/README.md`](mcp/README.md).
+
+### Commands
+
+Executables in `command/` become `atlana <name>`: `mcp`, `add-agent`, `install-cli`, `sync-skills` / `sync-skills-push` / `sync-skills-pull`, and the Neovim example's `install-neovim` / `sync-neovim`. Add your own the same way. `atlana commands` lists them.
 
 ---
 
@@ -203,36 +221,23 @@ With `--prefer ask` (default) conflicts prompt interactively; `--force` falls ba
 
 | Agent | Skills | Hooks | Rules file | Subagents |
 |-------|--------|-------|------------|-----------|
-| Crush | `~/.config/crush/skills` | `~/.config/crush/hooks` | `~/.config/crush/CRUSH.md` | built-in only |
+| Crush | `~/.config/crush/skills` | `~/.config/crush/hooks` | `~/.config/crush/CRUSH.md` | (built-in only) |
 | Cursor | `~/.cursor/skills` | — | `~/.cursor/rules/AGENTS.md` | — |
 | Claude Code | `~/.claude/skills` | `~/.claude/hooks` | `~/.claude/CLAUDE.md` | `~/.claude/agents` |
 | OpenCode | `~/.config/opencode/skills` | — | `~/.config/opencode/AGENTS.md` | — |
+| Grok | `~/.grok/skills` | — | `~/.grok/AGENTS.md` | — |
 | Generic | `~/.agents/skills` | — | `~/.agents/AGENTS.md` | — |
 | **Project** (`--project`) | `.cursor/skills`, `.crush/skills`, `.claude/skills`, `.agents/skills` | `./hooks` | `./AGENTS.md` | `.claude/agents` |
-
-Rules always install as the agent's expected filename (e.g. `CRUSH.md` for Crush), using `rules/AGENTS.md` as the source of truth.
-
-Not every agent supports every component — unsupported combinations are skipped with a warning (e.g. custom subagents only exist for Claude Code today). See [PORTING.md](PORTING.md) for the full mapping and workarounds.
-
----
-
-## Typical workflow
-
-1. **Detect** what's installed — `./bin/atlana agents`
-2. **Populate** the repo — `add` your best skills/hooks/rules once
-3. **Deploy** — `install` to machines and projects (`--project` for team-shared configs committed alongside the code)
-4. **Converge** — `sync` pulls improvements made inside agents back into the repo, pushes fixes out
-5. **Version** — everything is plain text in git; review diffs, commit, repeat
 
 ---
 
 ## Design principles
 
-- **Portable formats only** — Agent Skills folders, plain markdown, shell scripts. No proprietary lock-in.
-- **Deterministic where it matters** — hooks enforce hard limits outside the model; prompts stay soft.
-- **Content-based sync** — `sha256` hashes, never mtimes; clock skew can't create false conflicts.
-- **Safe by default** — confirmations on destructive actions, `--dry-run` everywhere, explicit direction control.
-- **One file CLI** — Bash 3.2+, no build step, easy to audit.
+- **One source of truth** — your environment lives in git; agents get copies.
+- **Bring your own content** — the framework ships no opinions you have to delete.
+- **No unsolicited commits** — agents commit only when asked.
+- **Hooks for must-never** — prompts are soft; hooks are hard.
+- **Portable** — markdown + YAML frontmatter; Bash 3.2+ CLI.
 
 ---
 
@@ -242,4 +247,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE)
+MIT

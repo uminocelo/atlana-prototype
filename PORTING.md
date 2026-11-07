@@ -1,15 +1,15 @@
 # Porting Atlana across agents
 
-Atlana is built on portable layers: **Agent Skills** (`SKILL.md`), context files (`AGENTS.md`), deterministic hooks (exit `2` = deny), and markdown subagents. Map each layer once and reuse it everywhere.
+Atlana is built on the **Agent Skills** open standard plus portable context and hooks. Map each layer once and reuse it.
 
 ## Layer map
 
-| Layer | Role | Crush | Claude Code | OpenCode | Cursor |
-|-------|------|-------|-------------|----------|--------|
-| **Rules** | Always-on soft guidance | `AGENTS.md`, `CRUSH.md`, `context_paths` | `CLAUDE.md`, `.claude/rules/` | `AGENTS.md` (or `CLAUDE.md`) | `.cursorrules`, `.cursor/rules/` |
-| **Skills** | On-demand procedures | `.crush/skills`, `.agents/skills`, … | `.claude/skills` | `.opencode/skills`, `.claude/skills` | `.cursor/skills` |
-| **Hooks** | Hard enforcement | `PreToolUse` in `crush.json` / crushrc | `PreToolUse` (+ more events) in `.claude/settings.json` | `tool.execute.before` (plugin/config) | Limited / rules-based |
-| **Subagents** | Isolated workers | Built-in **coder** + **task** (via `agent` tool) | `.claude/agents/*.md` | Agent configs / skills | Composer / rules |
+| Layer | Role | Crush | Claude Code | OpenCode | Cursor | Grok |
+|-------|------|-------|-------------|----------|--------|------|
+| **Rules** | Always-on soft guidance | `AGENTS.md`, `CRUSH.md`, `context_paths` | `CLAUDE.md`, `.claude/rules/` | `AGENTS.md` (or `CLAUDE.md`) | `.cursorrules`, `.cursor/rules/` | `AGENTS.md` (`~/.grok/`, repo root → cwd) |
+| **Skills** | On-demand procedures | `.crush/skills`, `.agents/skills`, … | `.claude/skills` | `.opencode/skills`, `.claude/skills` | `.cursor/skills` | `.grok/skills`, `~/.grok/skills`, `~/.claude/skills` |
+| **Hooks** | Hard enforcement | `PreToolUse` in `crush.json` / `crushrc` | `PreToolUse` (+ more events) in `.claude/settings.json` | `tool.execute.before` (plugin/config) | Limited / rules-based | `[[hooks.PreToolUse]]` in `~/.grok/config.toml`, `.grok/hooks/` |
+| **Subagents** | Isolated workers | Built-in **coder** + **task** (`agent` tool) | `.claude/agents/*.md` | Agent configs / skills | Composer / rules | Agent profiles in `.grok/agents/` |
 
 ## Recommended project layout
 
@@ -17,104 +17,99 @@ Atlana is built on portable layers: **Agent Skills** (`SKILL.md`), context files
 your-project/
 ├── AGENTS.md                 # portable rules (source of truth)
 ├── CLAUDE.md → AGENTS.md     # symlink for Claude Code
-├── hooks/                    # shared guardrail scripts (Crush + Claude compatible)
+├── hooks/                    # shared shell hooks (Crush + Claude compatible)
+│   └── block-destructive.sh
 ├── .crush.json               # or crushrc — hooks + skill paths (Crush)
 ├── .claude/
 │   ├── settings.json         # hooks for Claude Code
-│   └── agents/               # explorer.md, reviewer.md, planner.md
+│   ├── skills/               # or symlink to shared skills
+│   └── agents/               # explorer, reviewer, planner
+├── skills/ in Atlana repo → installed to .agents/skills/ etc. skills (or symlink)
 ├── .crush/skills/
-├── .cursor/skills/
-└── .agents/skills/
+└── .cursor/skills/
 ```
 
-Install Atlana's components into the project:
+Install your Atlana skills, hooks, rules, and subagents into the project (point the URL at your fork):
 
 ```bash
-./bin/atlana install \
-  --component skills --component hooks --component rules --component subagents \
-  --project --all --force
+curl -fsSL https://raw.githubusercontent.com/uminocelo/atlana-prototype/main/install.sh | bash -s -- --project --force
 ```
-
-This writes skills to all four project skill dirs, hooks to `./hooks`, rules to `./AGENTS.md`, and subagents to `.claude/agents/`.
 
 ## Rules
 
-1. Maintain **one** `AGENTS.md` at the repo root — Atlana treats `rules/AGENTS.md` as the source of truth.
+1. Maintain **one** `AGENTS.md` at the repo root.
 2. For Claude Code:
 
    ```bash
    ln -sf AGENTS.md CLAUDE.md
    ```
 
-3. Crush already prefers `AGENTS.md` by default.
-4. When installing via Atlana, each agent gets its expected filename automatically: `CRUSH.md` for Crush, `CLAUDE.md` for Claude Code, `rules/AGENTS.md` for Cursor, `AGENTS.md` for OpenCode.
+3. Crush already prefers `AGENTS.md` by default (`initialize_as`).
 
 ## Skills
 
-The same `SKILL.md` folders work everywhere Agent Skills are supported. No conversion needed.
+Same `SKILL.md` folders work everywhere Agent Skills are supported.
 
 ```bash
-# Import a skill from any project into Atlana, then install it to Crush
-./bin/atlana add --component skills --from ~/Projects/banana/my-skill --agent crush --force
-
-# Deploy every Atlana skill to every detected agent
-./bin/atlana sync --component skills --agent all --force
+# From Atlana repo or any skill source
+./skill-manager.sh --scan . --to project --project /path/to/app --force
+# or global for Crush
+./bin/atlana install my-skill --component skills --agent crush --force
 ```
-
-For agents without native skills support, encode the procedure as a rule section or a project doc and reference it from `AGENTS.md`.
 
 ## Hooks
 
-Scripts use exit code **2** to deny — identical semantics in Crush and Claude Code, so one script serves both.
+Scripts under `hooks/` use exit code **2** to deny (Crush + Claude Code).
 
 | Agent | Wire-up |
 |-------|---------|
-| **Crush** | Copy `templates/crush.json` → `.crush.json`, or `hook add` in crushrc (see [hooks/README.md](hooks/README.md)) |
+| **Crush** | Copy `templates/crush.json` → `.crush.json`, or `hook add` in `crushrc` (see `hooks/README.md`) |
 | **Claude Code** | `.claude/settings.json` PreToolUse entries pointing at the same scripts |
-| **OpenCode** | In a plugin on `tool.execute.before`, run the script; reject the tool call when exit code is `2` |
+| **OpenCode** | In a plugin, on `tool.execute.before`, run the script; if exit code is 2, reject the tool call |
 
-Crush exposes **PreToolUse** only today; Claude Code also has PostToolUse, Stop, SessionStart, etc. Keep shared policy in PreToolUse so one script serves both, and put agent-specific logic behind environment checks if needed.
+Crush only exposes **PreToolUse** today; Claude Code also has PostToolUse, Stop, SessionStart, etc. Keep shared policy in PreToolUse so one script serves both.
 
 ## Subagents
 
 ### Crush
 
-Crush ships two built-in agents:
+Crush ships two agents:
 
 - **coder** — full tools (implementation)
 - **task** — read-only tools (explore / research)
 
-The main agent spawns work via the **`agent`** tool. Custom markdown agents are not supported yet; encode specialized behavior as **skills** plus `AGENTS.md` guidance ("use the task agent for broad exploration").
+The main agent spawns work via the **`agent`** tool. You cannot yet drop custom markdown agents like Claude Code; encode specialized behavior as **skills** + AGENTS.md guidance (“use the task agent for broad exploration”).
 
 ### Claude Code
 
-Custom agents live in `.claude/agents/`. Atlana ships three under `subagents/`:
+Custom agents live in `.claude/agents/`:
 
 | File | Role |
 |------|------|
-| `explorer.md` | Read-only survey and research |
-| `reviewer.md` | Post-change correctness / security review |
-| `planner.md` | Structured planning in an isolated session |
+| `explorer.md` | Read-only survey |
+| `reviewer.md` | Post-change review |
+| `planner.md` | Structured plan in an isolated session (chat only) |
+| `elixir-writer.md` | *Example:* idiomatic Elixir implementation + tests |
+| `elixir-reviewer.md` | *Example:* Elixir review: logic, DRY, boundaries, OTP/Ecto |
+| `elixir-business-validator.md` | *Example:* validate business rules vs code |
 
-Install them with:
-
-```bash
-./bin/atlana install --component subagents --agent claude --all --force
-# or project-local:
-./bin/atlana install --component subagents --project --all --force
-```
+Install them with `./bin/atlana install --component subagents --agent claude --all --force` (or `--project`).
 
 ### OpenCode
 
-Prefer **AGENTS.md** + **skills**. Where OpenCode supports custom agents, mirror the explorer/reviewer prompts from `subagents/`.
+Prefer **AGENTS.md** + **skills**. Where OpenCode supports custom agents, mirror the explorer/reviewer prompts from `.claude/agents/`.
 
-## Mental model
+### Grok
+
+Atlana installs **skills** to `~/.grok/skills` and **rules** to `~/.grok/AGENTS.md` (`--agent grok`). Grok also reads `~/.claude/skills`, so a skill present in both places is deduplicated by Grok; keep the copies identical via `sync`. Hooks are declared as `[[hooks.PreToolUse]]` in `~/.grok/config.toml` (or `.grok/hooks/` per project, after `/hooks-trust`) pointing at the Atlana hook scripts; Atlana does not wire them automatically. `~/.grok/agents/` holds agent *profiles*, not Claude-style subagents, so subagents are not installed.
+
+## Mental model (best environment)
 
 ```
-Rules      →  what the model should always know
-Skills     →  multi-step workflows loaded on demand
-Hooks      →  what must never happen (deterministic, outside the model)
-Subagents  →  isolated context so the main thread stays clean
+AGENTS.md     →  what the model should always know
+Skills        →  multi-step workflows loaded on demand (your skills/)
+Hooks         →  what must never happen (rm -rf /, force push, …)
+Subagents     →  isolated context for research/review so the main thread stays clean
 ```
 
 Prompts are probabilistic. Hooks are deterministic. Use both.
